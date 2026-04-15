@@ -52,8 +52,8 @@ class QuadcopterEnvCfg(DirectRLEnvCfg):
     # env
     episode_length_s = 10.0
     decimation = 2
-    action_space = 6
-    observation_space = 15
+    action_space = 8
+    observation_space = 24
     state_space = 0
     debug_vis = True
 
@@ -146,8 +146,7 @@ class QuadcopterEnv(DirectRLEnv):
         #Prev step
         self._prev_payload_vel = torch.zeros(self.num_envs, 3, device=self.device)
         self._payload_acc = torch.zeros(self.num_envs, 3, device=self.device)
-        self._prev_distance_to_goal = torch.zeros(self.num_envs, device=self.device)
-
+        
         # add handle for debug visualization (this is set to a valid handle inside set_debug_vis)
         self.set_debug_vis(self.cfg.debug_vis)
 
@@ -182,11 +181,11 @@ class QuadcopterEnv(DirectRLEnv):
         body_2_state = self._robot.data.body_state_w[:, self._body_id_2, :]
         payload_state = self._robot.data.body_state_w[:, self._payload_sphere_id, :]
         
-        #payload_vel_w = payload_state[:, 7:10]
+        payload_vel_w = payload_state[:, 7:10]
         payload_pos_w = payload_state[:, :3]
         payload_to_goal_w = self._desired_pos_w - payload_pos_w
-        #self._payload_acc = (payload_vel_w - self._prev_payload_vel) / self.step_dt
-        #self._prev_payload_vel = payload_vel_w.clone()
+        self._payload_acc = (payload_vel_w - self._prev_payload_vel) / self.step_dt
+        self._prev_payload_vel = payload_vel_w.clone()
 
         obs = torch.cat(
             [
@@ -194,6 +193,9 @@ class QuadcopterEnv(DirectRLEnv):
                 body_1_state[:, 10:13], # dreone 1 ang vel
                 body_2_state[:, 7:10], #drone 2 lin vel
                 body_2_state[:, 10:13], # drone 2 ang vel
+                self._robot.data.projected_gravity_b,
+                payload_vel_w,
+                self._payload_acc,
                 payload_to_goal_w,
             ],
             dim=-1,
@@ -215,8 +217,7 @@ class QuadcopterEnv(DirectRLEnv):
         payload_vel_w = torch.sum(torch.square(payload_state[:, 7:10]), dim=1)
         distance_to_goal = torch.linalg.norm(self._desired_pos_w - self._robot.data.body_state_w[:, self._payload_sphere_id, :3], dim=1)
         distance_to_goal_mapped = 1 - torch.tanh(distance_to_goal / 0.8)
-
-
+        
         rewards = {
             "lin_vel_body_1": lin_vel_body_1 * self.cfg.lin_vel_reward_scale * self.step_dt,
             "ang_vel_body_1": ang_vel_body_1 * self.cfg.ang_vel_reward_scale * self.step_dt,
@@ -239,24 +240,36 @@ class QuadcopterEnv(DirectRLEnv):
 
         time_out = self.episode_length_buf >= self.max_episode_length - 1
 
+        quat_1 = self._robot.data.body_state_w[:, self._body_id_1, 3:7]
+        quat_2 = self._robot.data.body_state_w[:, self._body_id_2, 3:7]
+
+        z_body = self._z_body.repeat(self.num_envs, 1)
+        z_world_1 = quat_apply(quat_1, z_body)
+        z_world_2 = quat_apply(quat_2, z_body)
+        g_world = self._g_world.repeat(self.num_envs, 1)
+
 
         root_pos = self._robot.data.root_pos_w
-        lin_vel_1 = torch.linalg.norm(body_1_state[:, 7:10], dim=1)
+        #lin_vel_1 = torch.linalg.norm(body_1_state[:, 7:10], dim=1)
         ang_vel_1 = torch.linalg.norm(body_1_state[:, 10:13], dim=1)
-        lin_vel_2 = torch.linalg.norm(body_2_state[:, 7:10], dim=1)
+        #lin_vel_2 = torch.linalg.norm(body_2_state[:, 7:10], dim=1)
         ang_vel_2 = torch.linalg.norm(body_2_state[:, 10:13], dim=1)
-
+        payload_acc_norm = torch.linalg.norm(self._payload_acc, dim=1)
+        cos_angle_1 = -torch.sum(z_world_1 * g_world, dim=1)
+        cos_angle_2 = -torch.sum(z_world_2 * g_world, dim=1)
 
 
         bad_height = torch.logical_or(root_pos[:, 2] < 0.1, root_pos[:, 2] > 2.0)
-        bad_lin_vel_1 = lin_vel_1 > 10.0
+        #bad_lin_vel_1 = lin_vel_1 > 10.0
         bad_ang_vel_1 = ang_vel_1 > 20.0
-        bad_lin_vel_2 = lin_vel_2 > 10.0
+        #bad_lin_vel_2 = lin_vel_2 > 10.0
         bad_ang_vel_2 = ang_vel_2 > 20.0
         bad_state = ~torch.isfinite(root_pos).all(dim=1)
-        
+        bad_payload_acc = payload_acc_norm > 15.0
+        bad_tilt_1 = cos_angle_1 < 0.85  # 66 degrees          0.4  ~66, 0.7 ~45, 0.85 ~30
+        bad_tilt_2 = cos_angle_2 < 0.85  # 66 degrees
 
-        died = bad_height | bad_ang_vel_1 | bad_ang_vel_2 | bad_lin_vel_1 | bad_lin_vel_2 | bad_state 
+        died = bad_height | bad_ang_vel_1 | bad_ang_vel_2 | bad_state | bad_payload_acc | bad_tilt_1 | bad_tilt_2
         return died, time_out
 
    # def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
@@ -271,6 +284,9 @@ class QuadcopterEnv(DirectRLEnv):
         # Logging
         payload_state = self._robot.data.body_state_w[env_ids, self._payload_sphere_id, :]
         payload_pos_w = payload_state[:, :3]
+
+        self._prev_payload_vel[env_ids] = 0.0
+        self._payload_acc[env_ids] = 0.0
 
         final_distance_to_goal = torch.linalg.norm(
             self._desired_pos_w[env_ids] - payload_pos_w, dim=1
