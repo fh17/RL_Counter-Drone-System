@@ -98,6 +98,7 @@ class QuadcopterEnvCfg(DirectRLEnvCfg):
     lin_vel_reward_scale = -0.05
     ang_vel_reward_scale = -0.01
     distance_to_goal_reward_scale = 15.0
+    progress_to_goal_reward_scale = 10.0
 
 
 class QuadcopterEnv(DirectRLEnv):
@@ -126,6 +127,7 @@ class QuadcopterEnv(DirectRLEnv):
                 "ang_vel_body_2",
                 "distance_to_goal",
                 "lin_payload_vel",
+                "progress_to_goal",
             ]
         }
         # Get specific body indices
@@ -146,7 +148,8 @@ class QuadcopterEnv(DirectRLEnv):
         #Prev step
         self._prev_payload_vel = torch.zeros(self.num_envs, 3, device=self.device)
         self._payload_acc = torch.zeros(self.num_envs, 3, device=self.device)
-        
+        self._prev_distance_to_goal = torch.zeros(self.num_envs, device=self.device)
+
         # add handle for debug visualization (this is set to a valid handle inside set_debug_vis)
         self.set_debug_vis(self.cfg.debug_vis)
 
@@ -217,7 +220,9 @@ class QuadcopterEnv(DirectRLEnv):
         payload_vel_w = torch.sum(torch.square(payload_state[:, 7:10]), dim=1)
         distance_to_goal = torch.linalg.norm(self._desired_pos_w - self._robot.data.body_state_w[:, self._payload_sphere_id, :3], dim=1)
         distance_to_goal_mapped = 1 - torch.tanh(distance_to_goal / 0.8)
-        
+        progress_to_goal = self._prev_distance_to_goal - distance_to_goal
+        self._prev_distance_to_goal = distance_to_goal.clone()
+
         rewards = {
             "lin_vel_body_1": lin_vel_body_1 * self.cfg.lin_vel_reward_scale * self.step_dt,
             "ang_vel_body_1": ang_vel_body_1 * self.cfg.ang_vel_reward_scale * self.step_dt,
@@ -225,6 +230,7 @@ class QuadcopterEnv(DirectRLEnv):
             "ang_vel_body_2": ang_vel_body_2 * self.cfg.ang_vel_reward_scale * self.step_dt,
             "lin_payload_vel": payload_vel_w * self.cfg.payload_vel_reward_scale * self.step_dt,
             "distance_to_goal": distance_to_goal_mapped * self.cfg.distance_to_goal_reward_scale * self.step_dt,
+            "progress_to_goal": progress_to_goal * self.cfg.progress_to_goal_reward_scale * self.step_dt,
         }
         reward = torch.sum(torch.stack(list(rewards.values())), dim=0)
         # Logging
@@ -284,6 +290,11 @@ class QuadcopterEnv(DirectRLEnv):
         # Logging
         payload_state = self._robot.data.body_state_w[env_ids, self._payload_sphere_id, :]
         payload_pos_w = payload_state[:, :3]
+
+        self._prev_distance_to_goal[env_ids] = torch.linalg.norm(
+            self._desired_pos_w[env_ids] - payload_pos_w,
+            dim=1
+        )
 
         self._prev_payload_vel[env_ids] = 0.0
         self._payload_acc[env_ids] = 0.0
