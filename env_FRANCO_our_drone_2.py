@@ -50,7 +50,7 @@ class QuadcopterEnvWindow(BaseEnvWindow):
 @configclass
 class QuadcopterEnvCfg(DirectRLEnvCfg):
     # env
-    episode_length_s = 10.0
+    episode_length_s = 15.0
     decimation = 2
     action_space = 8
     observation_space = 24
@@ -98,6 +98,7 @@ class QuadcopterEnvCfg(DirectRLEnvCfg):
     lin_vel_reward_scale = -0.05
     ang_vel_reward_scale = -0.01
     distance_to_goal_reward_scale = 15.0
+    tilt_angle_reward_scale = -1.5
     progress_to_goal_reward_scale = 0.0
     success_reward_scale = 50.0
 
@@ -127,11 +128,14 @@ class QuadcopterEnv(DirectRLEnv):
                 "ang_vel_body_2",
                 "distance_to_goal",
                 "lin_payload_vel",
+                "tilt_angle_1",
+                "tilt_angle_2",
                 "progress_to_goal",
                 "success",
                 
             ]
         }
+
         # Get specific body indices
         print("ALL BODY NAMES:", self._robot.body_names)
         
@@ -214,6 +218,14 @@ class QuadcopterEnv(DirectRLEnv):
         body_1_state = self._robot.data.body_state_w[:, self._body_id_1, :]
         body_2_state = self._robot.data.body_state_w[:, self._body_id_2, :]
         payload_state = self._robot.data.body_state_w[:, self._payload_payload_id, :]
+
+        quat_1 = self._robot.data.body_state_w[:, self._body_id_1, 3:7]
+        quat_2 = self._robot.data.body_state_w[:, self._body_id_2, 3:7]
+        z_body = self._z_body.repeat(self.num_envs, 1)
+        z_world_1 = quat_apply(quat_1, z_body)
+        z_world_2 = quat_apply(quat_2, z_body)
+        g_world = self._g_world.repeat(self.num_envs, 1)
+
         
         lin_vel_body_1 = torch.sum(torch.square(body_1_state[:, 7:10]), dim=1)
         ang_vel_body_1 = torch.sum(torch.square(body_1_state[:, 10:13]), dim=1)
@@ -222,6 +234,8 @@ class QuadcopterEnv(DirectRLEnv):
         payload_vel_w = torch.sum(torch.square(payload_state[:, 7:10]), dim=1)
         distance_to_goal = torch.linalg.norm(self._desired_pos_w - self._robot.data.body_state_w[:, self._payload_payload_id, :3], dim=1)
         distance_to_goal_mapped = 1 - torch.tanh(distance_to_goal / 0.8)
+        cos_angle_1 = -torch.sum(z_world_1 * g_world, dim=1)
+        cos_angle_2 = -torch.sum(z_world_2 * g_world, dim=1)
         #progress_to_goal = self._prev_distance_to_goal - distance_to_goal
         #self._prev_distance_to_goal = distance_to_goal.clone()
         #success = (distance_to_goal < 0.05) & (payload_vel_w < 0.2)
@@ -233,6 +247,8 @@ class QuadcopterEnv(DirectRLEnv):
             "ang_vel_body_2": ang_vel_body_2 * self.cfg.ang_vel_reward_scale * self.step_dt,
             "lin_payload_vel": payload_vel_w * self.cfg.payload_vel_reward_scale * self.step_dt,
             "distance_to_goal": distance_to_goal_mapped * self.cfg.distance_to_goal_reward_scale * self.step_dt,
+            "tilt_angle_1": cos_angle_1 * self.cfg.tilt_angle_reward_scale * self.step_dt,
+            "tilt_angle_2": cos_angle_1 * self.cfg.tilt_angle_reward_scale * self.step_dt,
             #"progress_to_goal": progress_to_goal * self.cfg.progress_to_goal_reward_scale * self.step_dt,
             #"success": success.float() * self.cfg.success_reward_scale * self.step_dt,
         }
@@ -270,7 +286,7 @@ class QuadcopterEnv(DirectRLEnv):
         cos_angle_2 = -torch.sum(z_world_2 * g_world, dim=1)
 
 
-        bad_height = torch.logical_or(root_pos[:, 2] < 0.1, root_pos[:, 2] > 2.0)
+        bad_height = torch.logical_or(root_pos[:, 2] < 0.1, root_pos[:, 2] > 5.0)
         bad_lin_vel_1 = lin_vel_1 > 10.0
         bad_ang_vel_1 = ang_vel_1 > 20.0
         bad_lin_vel_2 = lin_vel_2 > 10.0
@@ -278,8 +294,20 @@ class QuadcopterEnv(DirectRLEnv):
         bad_state = ~torch.isfinite(body_1_state).all(dim=1) | ~torch.isfinite(body_2_state).all(dim=1) | ~torch.isfinite(root_pos).all(dim=1)
         too_close = drone_distance < 0.3  #drones width 0.5
         #bad_payload_acc = payload_acc_norm > 15.0
-        bad_tilt_1 = cos_angle_1 < 0.85  # 66 degrees          0.4  ~66, 0.7 ~45, 0.85 ~30
-        bad_tilt_2 = cos_angle_2 < 0.85  # 66 degrees
+        bad_tilt_1 = cos_angle_1 < 0.4  # n degrees      n= -->   0.4  ~66, 0.7 ~45, 0.85 ~30
+        bad_tilt_2 = cos_angle_2 < 0.4  # n degrees
+
+        self._termination_reasons = {
+            "bad_height": bad_height,
+            "bad_lin_vel_1": bad_lin_vel_1,
+            "bad_ang_vel_1": bad_ang_vel_1,
+            "bad_lin_vel_2": bad_lin_vel_2,
+            "bad_ang_vel_2": bad_ang_vel_2,
+            "bad_state": bad_state,
+            "bad_tilt_1": bad_tilt_1,
+            "bad_tilt_2": bad_tilt_2,
+            "too_close": too_close,
+        }   
 
         died = bad_height | bad_ang_vel_1 | bad_ang_vel_2 | bad_lin_vel_1 | bad_lin_vel_2 | bad_state | bad_tilt_1 | bad_tilt_2 | too_close
         return died, time_out
@@ -292,6 +320,27 @@ class QuadcopterEnv(DirectRLEnv):
     def _reset_idx(self, env_ids: torch.Tensor | None):
         if env_ids is None or len(env_ids) == self.num_envs:
             env_ids = self._robot._ALL_INDICES
+        
+        # Couter for training stats
+        if not hasattr(self, "_termination_counts_total"):
+            # define keys manually (safe)
+            self._termination_counts_total = {
+                "bad_height": 0,
+                "bad_lin_vel_1": 0,
+                "bad_ang_vel_1": 0,
+                "bad_lin_vel_2": 0,
+                "bad_ang_vel_2": 0,
+                "bad_state": 0,
+                "bad_tilt_1": 0,
+                "bad_tilt_2": 0,
+                "too_close": 0,
+            }
+            self._num_terminated_total = 0
+            self._num_timeouts_total = 0
+            self._num_resets_total = 0
+        if not hasattr(self, "_reward_sums_total"):
+            self._reward_sums_total = {key: 0.0 for key in self._episode_sums.keys()}
+            self._episodes_count_total = 0
 
         # Logging
         payload_state = self._robot.data.body_state_w[env_ids, self._payload_payload_id, :]
@@ -311,15 +360,16 @@ class QuadcopterEnv(DirectRLEnv):
         extras = dict()
 
         for key in self._episode_sums.keys():
-            episodic_sum_avg = torch.mean(self._episode_sums[key][env_ids])
+            episodic_sum_avg = torch.mean(self._episode_sums[key][env_ids]).item()       
             extras["Episode_Reward/" + key] = episodic_sum_avg / self.max_episode_length_s
+            self._reward_sums_total[key] += episodic_sum_avg * len(env_ids)          
             self._episode_sums[key][env_ids] = 0.0
-        self.extras["log"] = dict()
-        self.extras["log"].update(extras)
-        extras = dict()
+
         extras["Episode_Termination/died"] = torch.count_nonzero(self.reset_terminated[env_ids]).item()
         extras["Episode_Termination/time_out"] = torch.count_nonzero(self.reset_time_outs[env_ids]).item()
         extras["Metrics/final_distance_to_goal"] = final_distance_to_goal.item()
+
+        self.extras["log"] = dict()
         self.extras["log"].update(extras)
 
         self._robot.reset(env_ids)
@@ -330,13 +380,13 @@ class QuadcopterEnv(DirectRLEnv):
 
         self._actions[env_ids] = 0.0
         # Sample new commands
-        #self._desired_pos_w[env_ids, :2] = torch.zeros_like(self._desired_pos_w[env_ids, :2]).uniform_(-2.0, 2.0)
-        #self._desired_pos_w[env_ids, :2] += self._terrain.env_origins[env_ids, :2]
-        #self._desired_pos_w[env_ids, 2] = torch.zeros_like(self._desired_pos_w[env_ids, 2]).uniform_(0.5, 1.5)
+        self._desired_pos_w[env_ids, :2] = torch.zeros_like(self._desired_pos_w[env_ids, :2]).uniform_(-2.0, 2.0)
+        self._desired_pos_w[env_ids, :2] += self._terrain.env_origins[env_ids, :2]
+        self._desired_pos_w[env_ids, 2] = torch.zeros_like(self._desired_pos_w[env_ids, 2]).uniform_(0.5, 1.5)
         # Fixed target pos 
-        self._desired_pos_w[env_ids, 0] = self._terrain.env_origins[env_ids, 0] + 0.0
-        self._desired_pos_w[env_ids, 1] = self._terrain.env_origins[env_ids, 1] + 0.0
-        self._desired_pos_w[env_ids, 2] = 1.0
+        #self._desired_pos_w[env_ids, 0] = self._terrain.env_origins[env_ids, 0] + 0.0
+        #self._desired_pos_w[env_ids, 1] = self._terrain.env_origins[env_ids, 1] + 0.0
+        #self._desired_pos_w[env_ids, 2] = 1.0
         
         # Reset robot state
         joint_pos = self._robot.data.default_joint_pos[env_ids]
@@ -346,6 +396,31 @@ class QuadcopterEnv(DirectRLEnv):
         self._robot.write_root_pose_to_sim(default_root_state[:, :7], env_ids)
         self._robot.write_root_velocity_to_sim(default_root_state[:, 7:], env_ids)
         self._robot.write_joint_state_to_sim(joint_pos, joint_vel, None, env_ids)
+
+        # Update counters for stats
+        num_died = torch.count_nonzero(self.reset_terminated[env_ids]).item()
+        num_time_out = torch.count_nonzero(self.reset_time_outs[env_ids]).item()
+        self._num_terminated_total += num_died
+        self._num_timeouts_total += num_time_out
+        self._num_resets_total += len(env_ids)
+        self._episodes_count_total += len(env_ids)
+        if hasattr(self, "_termination_reasons"):
+            for key in self._termination_reasons.keys():
+                count = torch.count_nonzero(self._termination_reasons[key][env_ids]).item()
+                self._termination_counts_total[key] += count
+
+        # Print rewards
+        if self._num_resets_total % 1000 < len(env_ids):
+            print("\n---- Termination STATS ---")
+            print(f"Total resets: {self._num_resets_total}")
+            print(f"Total died: {self._num_terminated_total}")
+            print(f"Total timeouts: {self._num_timeouts_total}")
+            for key, count in self._termination_counts_total.items():
+                print(f"{key}: {count}")
+            print("\n---- Rewards STATS ----")
+            print(f"Total finished episodes: {self._episodes_count_total}")
+            for key, total in self._reward_sums_total.items():
+                print(f"{key}: {total / self._episodes_count_total:.4f}")
 
     def _set_debug_vis_impl(self, debug_vis: bool):
         # create markers if necessary for the first tome
@@ -365,3 +440,4 @@ class QuadcopterEnv(DirectRLEnv):
     def _debug_vis_callback(self, event):
         # update the markers
         self.goal_pos_visualizer.visualize(self._desired_pos_w)
+
