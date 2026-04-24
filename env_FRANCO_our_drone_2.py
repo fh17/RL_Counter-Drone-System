@@ -45,7 +45,8 @@ class QuadcopterEnvWindow(BaseEnvWindow):
                 with self.ui_window_elements["debug_vstack"]:
                     # add command manager visualization
                     self._create_debug_vis_ui_element("targets", self.env)
-
+                    
+                    
 
 @configclass
 class QuadcopterEnvCfg(DirectRLEnvCfg):

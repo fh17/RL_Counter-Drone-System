@@ -3,10 +3,10 @@ import isaaclab.sim as sim_utils
 from isaaclab.assets import ArticulationCfg
 from isaaclab.actuators import ImplicitActuatorCfg
 
-_2_DRONES_PAYLOAD_CFG = ArticulationCfg(
+OUR_DRONE_2_CFG = ArticulationCfg(
     prim_path="{ENV_REGEX_NS}/Robot",
     spawn=sim_utils.UsdFileCfg(
-        usd_path=os.path.abspath("./source/isaaclab_tasks/isaaclab_tasks/direct/quadcopter/Franco/assets/2x5_in_drone_with_payload.usd"),
+        usd_path=os.path.abspath("./source/isaaclab_tasks/isaaclab_tasks/direct/quadcopter/Franco/assets/Drones_fr.usd"),
         activate_contact_sensors=True,
     ),
     init_state=ArticulationCfg.InitialStateCfg(
