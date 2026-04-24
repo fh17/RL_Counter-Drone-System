@@ -53,7 +53,7 @@ class QuadcopterEnvCfg(DirectRLEnvCfg):
     episode_length_s = 15.0
     decimation = 2
     action_space = 8
-    observation_space = 24
+    observation_space = 50
     state_space = 0
     debug_vis = True
 
@@ -190,6 +190,10 @@ class QuadcopterEnv(DirectRLEnv):
         body_2_state = self._robot.data.body_state_w[:, self._body_id_2, :]
         payload_state = self._robot.data.body_state_w[:, self._payload_payload_id, :]
         
+
+        drone1_to_payload = payload_state[:, :3] - body_1_state[:, :3]
+        drone2_to_payload = payload_state[:, :3] - body_2_state[:, :3]
+        drone_to_drone = body_2_state[:, :3] - body_1_state[:, :3]
         payload_vel_w = payload_state[:, 7:10]
         payload_pos_w = payload_state[:, :3]
         payload_to_goal_w = self._desired_pos_w - payload_pos_w
@@ -198,11 +202,19 @@ class QuadcopterEnv(DirectRLEnv):
 
         obs = torch.cat(
             [
+                body_1_state[:, :3] - self._terrain.env_origins[:, :3], #position drone 1 in env
+                body_2_state[:, :3] - self._terrain.env_origins[:, :3], #position drone 2 in env
+                payload_state[:, :3] - self._terrain.env_origins[:, :3], #position payload in env
+                body_1_state[:, 3:7],  # quat1
+                body_2_state[:, 3:7],  # quat2
                 body_1_state[:, 7:10], #drone 1 lin vel
                 body_1_state[:, 10:13], # dreone 1 ang vel
                 body_2_state[:, 7:10], #drone 2 lin vel
                 body_2_state[:, 10:13], # drone 2 ang vel
                 self._robot.data.projected_gravity_b,
+                drone1_to_payload,
+                drone2_to_payload,
+                drone_to_drone,
                 payload_vel_w,
                 self._payload_acc,
                 payload_to_goal_w,
@@ -236,9 +248,9 @@ class QuadcopterEnv(DirectRLEnv):
         distance_to_goal_mapped = 1 - torch.tanh(distance_to_goal / 0.8)
         cos_angle_1 = -torch.sum(z_world_1 * g_world, dim=1)
         cos_angle_2 = -torch.sum(z_world_2 * g_world, dim=1)
-        #progress_to_goal = self._prev_distance_to_goal - distance_to_goal
-        #self._prev_distance_to_goal = distance_to_goal.clone()
-        #success = (distance_to_goal < 0.05) & (payload_vel_w < 0.2)
+        progress_to_goal = self._prev_distance_to_goal - distance_to_goal
+        self._prev_distance_to_goal = distance_to_goal.clone()
+        success = (distance_to_goal < 0.05) & (payload_vel_w < 0.2)
 
         rewards = {
             "lin_vel_body_1": lin_vel_body_1 * self.cfg.lin_vel_reward_scale * self.step_dt,
@@ -249,8 +261,8 @@ class QuadcopterEnv(DirectRLEnv):
             "distance_to_goal": distance_to_goal_mapped * self.cfg.distance_to_goal_reward_scale * self.step_dt,
             "tilt_angle_1": cos_angle_1 * self.cfg.tilt_angle_reward_scale * self.step_dt,
             "tilt_angle_2": cos_angle_1 * self.cfg.tilt_angle_reward_scale * self.step_dt,
-            #"progress_to_goal": progress_to_goal * self.cfg.progress_to_goal_reward_scale * self.step_dt,
-            #"success": success.float() * self.cfg.success_reward_scale * self.step_dt,
+            "progress_to_goal": progress_to_goal * self.cfg.progress_to_goal_reward_scale * self.step_dt,
+            "success": success.float() * self.cfg.success_reward_scale * self.step_dt,
         }
         reward = torch.sum(torch.stack(list(rewards.values())), dim=0)
         # Logging
