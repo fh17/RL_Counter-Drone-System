@@ -86,7 +86,7 @@ class QuadcopterEnvCfg(DirectRLEnvCfg):
     )
 
     # scene
-    scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=1024, env_spacing=2.5, replicate_physics=True)
+    scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=8192, env_spacing=2.5, replicate_physics=True)
 
     # robot
     robot:  ArticulationCfg = OUR_DRONE_3_CFG.replace(prim_path="/World/envs/env_.*/Robot")
@@ -94,11 +94,12 @@ class QuadcopterEnvCfg(DirectRLEnvCfg):
     moment_scale = 0.01
 
     # reward scales
-    payload_vel_reward_scale = -0.07
-    lin_vel_reward_scale = -0.05
-    ang_vel_reward_scale = -0.01
+    payload_vel_reward_scale = -1.5
+    lin_vel_reward_scale = -0.5
+    ang_vel_reward_scale = -0.1
     distance_to_goal_reward_scale = 15.0
-    tilt_angle_reward_scale = -1.5
+    tilt_angle_reward_scale = -0.5
+    payload_horizontal_alignment_reward_scale = 1.0
     progress_to_goal_reward_scale = 0.0
     success_reward_scale = 50.0
 
@@ -260,8 +261,8 @@ class QuadcopterEnv(DirectRLEnv):
         distance_to_goal_mapped = 1 - torch.tanh(distance_to_goal / 0.8)
         cos_angle_1 = 1 - (-torch.sum(z_world_1 * g_world, dim=1))
         cos_angle_2 = 1 - (-torch.sum(z_world_2 * g_world, dim=1))
-        cos_angle_3 = -torch.sum(z_world_3 * g_world, dim=1)
-        payload_g_angle = 1 - (-torch.sum(payload_z_world * g_world, dim=1))
+        cos_angle_3 = 1 - (-torch.sum(z_world_3 * g_world, dim=1))
+        payload_g_angle = -torch.sum(payload_z_world * g_world, dim=1)
         #progress_to_goal = self._prev_distance_to_goal - distance_to_goal
         #self._prev_distance_to_goal = distance_to_goal.clone()
         #success = (distance_to_goal < 0.05) & (payload_vel_w < 0.2)
@@ -279,7 +280,7 @@ class QuadcopterEnv(DirectRLEnv):
                 "lin_vel_body_3": lin_vel_body_3 * self.cfg.lin_vel_reward_scale * self.step_dt,
                 "ang_vel_body_3": ang_vel_body_3 * self.cfg.ang_vel_reward_scale * self.step_dt,
                 "lin_payload_vel": payload_vel_w * self.cfg.payload_vel_reward_scale * self.step_dt,
-                "payload_horizontal_alignment": payload_g_angle * self.cfg.tilt_angle_reward_scale * self.step_dt,
+                "payload_horizontal_alignment": payload_g_angle * self.cfg.payload_horizontal_alignment_reward_scale * self.step_dt,
             }
 
         elif self.curriculum_phase == 1:
@@ -433,6 +434,7 @@ class QuadcopterEnv(DirectRLEnv):
             self._reward_sums_total[key] += episodic_sum_avg * len(env_ids)          
             self._episode_sums[key][env_ids] = 0.0
 
+        total_avg_reward = sum(extras[key] for key in extras if "Episode_Reward/" in key)
         extras["Episode_Termination/died"] = torch.count_nonzero(self.reset_terminated[env_ids]).item()
         extras["Episode_Termination/time_out"] = torch.count_nonzero(self.reset_time_outs[env_ids]).item()
         extras["Metrics/final_distance_to_goal"] = final_distance_to_goal.item()
@@ -509,8 +511,9 @@ class QuadcopterEnv(DirectRLEnv):
             self._last_died_total = self._num_terminated_total
             self._last_timeout_total = self._num_timeouts_total
 
+            print(f"PHASE={self.curriculum_phase}, total_avg_reward={total_avg_reward:.4f}")
             if self.curriculum_phase == 0:
-                if timeout_window > died_window:    #more cases of survival than non-survival
+                if self.common_step_counter > 500 and total_avg_reward > -0.15:
                     self.curriculum_phase = 1
                     print("CURRICULUM INCREASED TO PHASE 1")
 
@@ -555,3 +558,4 @@ class QuadcopterEnv(DirectRLEnv):
     def _debug_vis_callback(self, event):
         # update the markers
         self.goal_pos_visualizer.visualize(self._desired_pos_w)
+
